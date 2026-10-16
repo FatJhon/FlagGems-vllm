@@ -25,7 +25,6 @@ import torch
 import triton
 import triton.experimental.tle.language as tle
 import triton.language as tl
-import triton.language.extra.cann.extension as al
 
 from flaggems_vllm.ops.FLA.utils import SUPPRESS_LEVEL
 
@@ -37,7 +36,7 @@ def safe_exp(x):
 
 MAX_PROGRAMS_PER_LAUNCH = 8192
 SINGLE_KERNEL_MAX_TOTAL_CHUNKS = 13
-LLMINFER_GDR_DEFAULT_NUM_AIC = 24
+GDR_DEFAULT_NUM_AIC = 24
 
 
 def _get_aic_num() -> int:
@@ -48,8 +47,8 @@ def _get_aic_num() -> int:
         if num_aicore > 0:
             return num_aicore
     except Exception:
-        return LLMINFER_GDR_DEFAULT_NUM_AIC
-    return LLMINFER_GDR_DEFAULT_NUM_AIC
+        return GDR_DEFAULT_NUM_AIC
+    return GDR_DEFAULT_NUM_AIC
 
 
 @triton.jit
@@ -2289,21 +2288,21 @@ def _stage6_loop_pipeline_produce_qk_qh(
     b_h = tl.load(p_h, volatile=True)
     b_qk = tl.dot(b_q, b_k)
     b_qh = tl.dot(b_q, b_h)
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
     tl.store(p_qk, b_qk.to(p_qk.dtype.element_ty))
     tl.store(p_qh, b_qh.to(p_qh.dtype.element_ty))
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "cube",
         "vector",
         2 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
 
 
@@ -2340,21 +2339,21 @@ def _stage6_loop_pipeline_preprocess(
     p_gated_qk = tl.make_block_ptr(
         gated_qk_worker_base, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "cube",
         "vector",
         2 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     b_qk = tl.load(p_qk).to(tl.float32)
     b_qh = tl.load(p_qh).to(tl.float32)
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
     token_offsets = token_start + tl.arange(0, BT)
     valid_tokens = token_offsets < sequence_tokens
@@ -2372,12 +2371,12 @@ def _stage6_loop_pipeline_preprocess(
     causal_mask = causal_idx[:, None] >= causal_idx[None, :]
     b_gated_qk = tl.where(causal_mask, b_qk, 0.0)
     tl.store(p_gated_qk, b_gated_qk.to(p_gated_qk.dtype.element_ty))
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         4 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE3,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     return b_qh_scaled
 
@@ -2411,23 +2410,23 @@ def _stage6_loop_pipeline_qkv(
         gated_qk_worker_base, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
     )
     p_qkv = tl.make_block_ptr(qkv_worker_base, (BT, V), (V, 1), (0, 0), (BT, V), (1, 0))
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         4 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE3,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     b_gated_qk = tl.load(p_gated_qk)
     b_v = tl.load(p_v, boundary_check=(0, 1), volatile=True)
     b_qkv = tl.dot(b_gated_qk, b_v)
     tl.store(p_qkv, b_qkv.to(p_qkv.dtype.element_ty))
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "cube",
         "vector",
         6 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
 
 
@@ -2455,12 +2454,12 @@ def _stage6_loop_pipeline_finalize(
     p_o = tl.make_block_ptr(
         o_base, (sequence_tokens, V), (stride_v, 1), (token_start, 0), (BT, V), (1, 0)
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "cube",
         "vector",
         6 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     b_qkv = tl.load(p_qkv).to(tl.float32)
     b_o = (b_qh_scaled + b_qkv) * scale
@@ -2520,22 +2519,22 @@ def _stage6_head_pair_produce_qk_qh(
     b_qk = tl.dot(b_q, b_k)
     b_qh0 = tl.dot(b_q, b_h0)
     b_qh1 = tl.dot(b_q, b_h1)
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
     tl.store(p_qk, b_qk.to(p_qk.dtype.element_ty))
     tl.store(p_qh0, b_qh0.to(p_qh0.dtype.element_ty))
     tl.store(p_qh1, b_qh1.to(p_qh1.dtype.element_ty))
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "cube",
         "vector",
         2 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
 
 
@@ -2581,22 +2580,22 @@ def _stage6_head_pair_preprocess(
     p_gated1 = tl.make_block_ptr(
         gated_worker_base + BT * BT, (BT, BT), (BT, 1), (0, 0), (BT, BT), (1, 0)
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "cube",
         "vector",
         2 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     b_qk = tl.load(p_qk).to(tl.float32)
     b_qh0 = tl.load(p_qh0).to(tl.float32)
     b_qh1 = tl.load(p_qh1).to(tl.float32)
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
     token_offsets = token_start + tl.arange(0, BT)
     valid_tokens = token_offsets < sequence_tokens
@@ -2622,12 +2621,12 @@ def _stage6_head_pair_preprocess(
     b_gated1 = tl.where(causal_mask, b_gated1, 0.0)
     tl.store(p_gated0, b_gated0.to(p_gated0.dtype.element_ty))
     tl.store(p_gated1, b_gated1.to(p_gated1.dtype.element_ty))
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         4 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE3,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     return (b_qh0, b_qh1)
 
@@ -2677,12 +2676,12 @@ def _stage6_head_pair_qkv(
     p_qkv1 = tl.make_block_ptr(
         qkv_worker_base + BT * V, (BT, V), (V, 1), (0, 0), (BT, V), (1, 0)
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         4 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_MTE3,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     b_gated0 = tl.load(p_gated0)
     b_gated1 = tl.load(p_gated1)
@@ -2692,12 +2691,12 @@ def _stage6_head_pair_qkv(
     b_qkv1 = tl.dot(b_gated1, b_v1)
     tl.store(p_qkv0, b_qkv0.to(p_qkv0.dtype.element_ty))
     tl.store(p_qkv1, b_qkv1.to(p_qkv1.dtype.element_ty))
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "cube",
         "vector",
         6 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
 
 
@@ -2739,12 +2738,12 @@ def _stage6_head_pair_finalize(
     p_o1 = tl.make_block_ptr(
         o_base1, (sequence_tokens, V), (stride_v, 1), (token_start, 0), (BT, V), (1, 0)
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "cube",
         "vector",
         6 + buffer_id,
-        sender_pipe=al.PIPE.PIPE_FIX,
-        receiver_pipe=al.PIPE.PIPE_MTE2,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
     )
     b_qkv0 = tl.load(p_qkv0).to(tl.float32)
     b_qkv1 = tl.load(p_qkv1).to(tl.float32)
@@ -2782,19 +2781,19 @@ def _run_stage6_head_pair_loop_pipeline(
     num_workers = tl.num_programs(1)
     total_tokens = 1 * T
     num_sequences = TOTAL_TASKS // H
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         0,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         1,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
     db_flag = 0
     global_task_base = 0
@@ -2914,19 +2913,19 @@ def _run_stage6_head_pair_loop_pipeline(
                 )
                 db_flag += 1
         global_task_base += sequence_tasks
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         0,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         1,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
 
 
@@ -2958,19 +2957,19 @@ def _run_stage6_loop_pipeline(
     num_workers = tl.num_programs(1)
     total_tokens = 1 * T
     num_sequences = TOTAL_TASKS // H
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         0,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
-    al.sync_block_set(
+    tle.dsa.ascend.sync_block_set(
         "vector",
         "cube",
         1,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
     db_flag = 0
     global_task_base = 0
@@ -3090,19 +3089,19 @@ def _run_stage6_loop_pipeline(
                 )
                 db_flag += 1
         global_task_base += sequence_tasks
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         0,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
-    al.sync_block_wait(
+    tle.dsa.ascend.sync_block_wait(
         "vector",
         "cube",
         1,
-        sender_pipe=al.PIPE.PIPE_MTE2,
-        receiver_pipe=al.PIPE.PIPE_FIX,
+        sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
+        receiver_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
     )
 
 
@@ -3306,22 +3305,22 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
         )
         tl.store(p_first_h_k0, b_h_k0.to(p_first_h_k0.dtype.element_ty))
         tl.store(p_first_h_k1, b_h_k1.to(p_first_h_k1.dtype.element_ty))
-        al.sync_block_set(
+        tle.dsa.ascend.sync_block_set(
             "vector",
             "cube",
             3,
-            sender_pipe=al.PIPE.PIPE_MTE3,
-            receiver_pipe=al.PIPE.PIPE_MTE2,
+            sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+            receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
         )
         for chunk_idx in range(num_chunks):
             token_start = chunk_idx * BT
             valid_t_row = offs_t_row + token_start < sequence_tokens
-            al.sync_block_wait(
+            tle.dsa.ascend.sync_block_wait(
                 "vector",
                 "cube",
                 3,
-                sender_pipe=al.PIPE.PIPE_MTE3,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
             p_state_full = tl.make_block_ptr(
                 state_worker_base, (K, V), (V, 1), (0, 0), (K, BV), (1, 0)
@@ -3341,12 +3340,12 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
                 wh_worker_base, (BT, V), (V, 1), (0, 0), (BT, BV), (1, 0)
             )
             tl.store(p_wh, b_wh.to(p_wh.dtype.element_ty))
-            al.sync_block_set(
+            tle.dsa.ascend.sync_block_set(
                 "cube",
                 "vector",
                 0,
-                sender_pipe=al.PIPE.PIPE_FIX,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
             b_u = tl.load(
                 u_base + (token_start + offs_t_row) * stride_u + offs_v,
@@ -3361,12 +3360,12 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
                 b_g = tl.load(g_base + token_offsets, mask=valid_tokens, other=0.0)
                 b_decay = safe_exp(b_g_last_raw - b_g)
                 b_state_decay = tl.exp(b_g_last_raw)
-            al.sync_block_wait(
+            tle.dsa.ascend.sync_block_wait(
                 "cube",
                 "vector",
                 0,
-                sender_pipe=al.PIPE.PIPE_FIX,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
             b_wh = tl.load(p_wh).to(tl.float32)
             b_v_new = b_u - b_wh
@@ -3399,19 +3398,19 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
                 gated_v_worker_base, (BT, V), (V, 1), (0, 0), (BT, BV), (1, 0)
             )
             tl.store(p_gated_v, b_gated_v.to(p_gated_v.dtype.element_ty))
-            al.sync_block_set(
+            tle.dsa.ascend.sync_block_set(
                 "vector",
                 "cube",
                 1,
-                sender_pipe=al.PIPE.PIPE_MTE3,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
-            al.sync_block_wait(
+            tle.dsa.ascend.sync_block_wait(
                 "vector",
                 "cube",
                 1,
-                sender_pipe=al.PIPE.PIPE_MTE3,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
             b_v_new_cube = tl.load(p_gated_v)
             p_kv_k0 = tl.make_block_ptr(
@@ -3425,19 +3424,19 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
             )
             b_kv_full = tl.dot(b_k_full, b_v_new_cube)
             tl.store(p_kv_full, b_kv_full.to(p_kv_full.dtype.element_ty))
-            al.sync_block_set(
+            tle.dsa.ascend.sync_block_set(
                 "cube",
                 "vector",
                 2,
-                sender_pipe=al.PIPE.PIPE_FIX,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
-            al.sync_block_wait(
+            tle.dsa.ascend.sync_block_wait(
                 "cube",
                 "vector",
                 2,
-                sender_pipe=al.PIPE.PIPE_FIX,
-                receiver_pipe=al.PIPE.PIPE_MTE2,
+                sender_pipe=tle.dsa.ascend.PIPE.PIPE_FIX,
+                receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
             )
             b_h_k0 += tl.load(p_kv_k0).to(tl.float32)
             b_h_k1 += tl.load(p_kv_k1).to(tl.float32)
@@ -3454,12 +3453,12 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
                 tl.store(p_next_h_k0, b_h_k0.to(p_next_h_k0.dtype.element_ty))
                 tl.store(p_next_h_k1, b_h_k1.to(p_next_h_k1.dtype.element_ty))
             if chunk_idx + 1 < num_chunks:
-                al.sync_block_set(
+                tle.dsa.ascend.sync_block_set(
                     "vector",
                     "cube",
                     3,
-                    sender_pipe=al.PIPE.PIPE_MTE3,
-                    receiver_pipe=al.PIPE.PIPE_MTE2,
+                    sender_pipe=tle.dsa.ascend.PIPE.PIPE_MTE3,
+                    receiver_pipe=tle.dsa.ascend.PIPE.PIPE_MTE2,
                 )
         if STORE_FINAL_STATE:
             ht_base = ht + scheduled_sequence_head_idx * K * V
@@ -3471,7 +3470,7 @@ def chunk_gated_delta_rule_fwd_stage5_6_kernel(
             )
             tl.store(p_ht_k0, b_h_k0)
             tl.store(p_ht_k1, b_h_k1)
-    al.sync_block_all("all", 0)
+    tle.dsa.ascend.sync_block_all("all", 0)
     if STAGE6_HEAD_PAIR:
         _run_stage6_head_pair_loop_pipeline(
             q=q,
