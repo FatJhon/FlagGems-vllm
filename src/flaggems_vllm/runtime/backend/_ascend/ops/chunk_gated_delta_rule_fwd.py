@@ -23,6 +23,7 @@ import math
 
 import torch
 import triton
+import triton.experimental.tle.language as tle
 import triton.language as tl
 import triton.language.extra.cann.extension as al
 
@@ -32,16 +33,6 @@ from flaggems_vllm.ops.FLA.utils import SUPPRESS_LEVEL
 @triton.jit
 def safe_exp(x):
     return tl.exp(tl.where(x <= 0, x, float("-inf")))
-
-
-@triton.jit
-def extract_slice(ful, offsets, sizes, strides):
-    return tl.extract_slice(ful, offsets, sizes, strides)
-
-
-@triton.jit
-def insert_slice(ful, sub, offsets, sizes, strides):
-    return tl.insert_slice(ful, sub, offsets, sizes, strides)
 
 
 MAX_PROGRAMS_PER_LAUNCH = 8192
@@ -405,7 +396,7 @@ def _solve_tril_16x16_one_block(
             b_A_subrec16 = tl.load(ptr_A_subrec16, mask=load_mask, other=0.0).to(
                 tl.float32
             )
-            b_A = insert_slice(
+            b_A = tle.dsa.insert_slice(
                 ful=b_A,
                 sub=b_A_subrec16[None, :, :],  # (1, 16, 16)
                 offsets=[blkid, 0, 0],
@@ -425,7 +416,7 @@ def _solve_tril_16x16_one_block(
 
         # for loop to update N_BLOCKS row vector
         for i in range(1, 16):
-            nblks_vec16 = -extract_slice(
+            nblks_vec16 = -tle.dsa.extract_slice(
                 local_ori_A, (i, 0), (1, 16 * N_BLOCKS), (16 * N_BLOCKS, 1)
             )
             b_a = tl.reshape(nblks_vec16, (N_BLOCKS, 16))
@@ -435,7 +426,7 @@ def _solve_tril_16x16_one_block(
             b_a = b_a + dot_product
 
             b_a_new_expanded = b_a[:, None, :]
-            b_A = insert_slice(
+            b_A = tle.dsa.insert_slice(
                 ful=b_A,
                 sub=b_a_new_expanded,
                 offsets=[0, i, 0],
@@ -636,9 +627,9 @@ def merge_16x16_to_64x64_inverse_kernel(
 
     # build Ai_22_32 (32 * 32)
     Ai_22_32 = tl.zeros((32, 32), tl.float32)
-    Ai_22_32 = insert_slice(Ai_22_32, Ai_33, (0, 0), (16, 16), (1, 1))
-    Ai_22_32 = insert_slice(Ai_22_32, Ai_44, (16, 16), (16, 16), (1, 1))
-    Ai_22_32 = insert_slice(Ai_22_32, Ai_43, (16, 0), (16, 16), (1, 1))
+    Ai_22_32 = tle.dsa.insert_slice(Ai_22_32, Ai_33, (0, 0), (16, 16), (1, 1))
+    Ai_22_32 = tle.dsa.insert_slice(Ai_22_32, Ai_44, (16, 16), (16, 16), (1, 1))
+    Ai_22_32 = tle.dsa.insert_slice(Ai_22_32, Ai_43, (16, 0), (16, 16), (1, 1))
 
     # load A_21_32 (A block at row i_t * 64 + 32, col 0, 32 * 32)
     offs_m = i_t * 64 + 32 + tl.arange(0, 32)
@@ -650,9 +641,9 @@ def merge_16x16_to_64x64_inverse_kernel(
 
     # build Ai_11_32 (32 * 32)
     Ai_11_32 = tl.zeros((32, 32), tl.float32)
-    Ai_11_32 = insert_slice(Ai_11_32, Ai_11, (0, 0), (16, 16), (1, 1))
-    Ai_11_32 = insert_slice(Ai_11_32, Ai_22, (16, 16), (16, 16), (1, 1))
-    Ai_11_32 = insert_slice(Ai_11_32, Ai_21, (16, 0), (16, 16), (1, 1))
+    Ai_11_32 = tle.dsa.insert_slice(Ai_11_32, Ai_11, (0, 0), (16, 16), (1, 1))
+    Ai_11_32 = tle.dsa.insert_slice(Ai_11_32, Ai_22, (16, 16), (16, 16), (1, 1))
+    Ai_11_32 = tle.dsa.insert_slice(Ai_11_32, Ai_21, (16, 0), (16, 16), (1, 1))
 
     Ai_21_32 = -tl.dot(tmp, Ai_11_32, input_precision="ieee")
 
@@ -813,34 +804,34 @@ def _load_a32(a, t_local, row, H, BT: tl.constexpr):
 @triton.jit
 def _block_diag_16(x0, x1):
     result = tl.zeros((32, 32), dtype=tl.float32)
-    result = insert_slice(result, x0, (0, 0), (16, 16), (1, 1))
-    result = insert_slice(result, x1, (16, 16), (16, 16), (1, 1))
+    result = tle.dsa.insert_slice(result, x0, (0, 0), (16, 16), (1, 1))
+    result = tle.dsa.insert_slice(result, x1, (16, 16), (16, 16), (1, 1))
     return result
 
 
 @triton.jit
 def _block_diag_32(x0, x1):
     result = tl.zeros((64, 64), dtype=tl.float32)
-    result = insert_slice(result, x0, (0, 0), (32, 32), (1, 1))
-    result = insert_slice(result, x1, (32, 32), (32, 32), (1, 1))
+    result = tle.dsa.insert_slice(result, x0, (0, 0), (32, 32), (1, 1))
+    result = tle.dsa.insert_slice(result, x1, (32, 32), (32, 32), (1, 1))
     return result
 
 
 @triton.jit
 def _assemble_32(d0, d1, offdiag):
     result = tl.zeros((32, 32), dtype=tl.float32)
-    result = insert_slice(result, d0, (0, 0), (16, 16), (1, 1))
-    result = insert_slice(result, d1, (16, 16), (16, 16), (1, 1))
-    result = insert_slice(result, offdiag, (16, 0), (16, 16), (1, 1))
+    result = tle.dsa.insert_slice(result, d0, (0, 0), (16, 16), (1, 1))
+    result = tle.dsa.insert_slice(result, d1, (16, 16), (16, 16), (1, 1))
+    result = tle.dsa.insert_slice(result, offdiag, (16, 0), (16, 16), (1, 1))
     return result
 
 
 @triton.jit
 def _assemble_64(ai11, ai22, ai21):
     result = tl.zeros((64, 64), dtype=tl.float32)
-    result = insert_slice(result, ai11, (0, 0), (32, 32), (1, 1))
-    result = insert_slice(result, ai22, (32, 32), (32, 32), (1, 1))
-    result = insert_slice(result, ai21, (32, 0), (32, 32), (1, 1))
+    result = tle.dsa.insert_slice(result, ai11, (0, 0), (32, 32), (1, 1))
+    result = tle.dsa.insert_slice(result, ai22, (32, 32), (32, 32), (1, 1))
+    result = tle.dsa.insert_slice(result, ai21, (32, 0), (32, 32), (1, 1))
     return result
 
 
@@ -880,12 +871,12 @@ def _merge_pair_16x16_to_64x64_inverse_one(
     ai11_0 = _assemble_32(
         d0,
         d1,
-        extract_slice(ai10_pair, (0, 0), (16, 16), (1, 1)),
+        tle.dsa.extract_slice(ai10_pair, (0, 0), (16, 16), (1, 1)),
     )
     ai11_1 = _assemble_32(
         d4,
         d5,
-        extract_slice(ai10_pair, (16, 16), (16, 16), (1, 1)),
+        tle.dsa.extract_slice(ai10_pair, (16, 16), (16, 16), (1, 1)),
     )
 
     d2 = _load_ad16(Ad, t_local, row0 + 32, H)
@@ -906,12 +897,12 @@ def _merge_pair_16x16_to_64x64_inverse_one(
     ai22_0 = _assemble_32(
         d2,
         d3,
-        extract_slice(ai32_pair, (0, 0), (16, 16), (1, 1)),
+        tle.dsa.extract_slice(ai32_pair, (0, 0), (16, 16), (1, 1)),
     )
     ai22_1 = _assemble_32(
         d6,
         d7,
-        extract_slice(ai32_pair, (16, 16), (16, 16), (1, 1)),
+        tle.dsa.extract_slice(ai32_pair, (16, 16), (16, 16), (1, 1)),
     )
 
     a21_0 = _load_a32(A, t_local, row0 + 32, H, BT)
@@ -929,12 +920,12 @@ def _merge_pair_16x16_to_64x64_inverse_one(
     result0 = _assemble_64(
         ai11_0,
         ai22_0,
-        extract_slice(ai21_pair, (0, 0), (32, 32), (1, 1)),
+        tle.dsa.extract_slice(ai21_pair, (0, 0), (32, 32), (1, 1)),
     )
     result1 = _assemble_64(
         ai11_1,
         ai22_1,
-        extract_slice(ai21_pair, (32, 32), (32, 32), (1, 1)),
+        tle.dsa.extract_slice(ai21_pair, (32, 32), (32, 32), (1, 1)),
     )
     out0 = tl.make_block_ptr(
         Ai,
@@ -1081,8 +1072,8 @@ def _load_chunk_pair(A_inv, bos, t_local, row_start, i_h, H, BT: tl.constexpr):
         )
         block1 = tl.load(a1, boundary_check=(0, 1), padding_option="zero")
     pair = tl.zeros([2 * BT, 2 * BT], dtype=A_inv.dtype.element_ty)
-    pair = insert_slice(pair, block0, [0, 0], [BT, BT], [1, 1])
-    pair = insert_slice(pair, block1, [BT, BT], [BT, BT], [1, 1])
+    pair = tle.dsa.insert_slice(pair, block0, [0, 0], [BT, BT], [1, 1])
+    pair = tle.dsa.insert_slice(pair, block1, [BT, BT], [BT, BT], [1, 1])
     return pair
 
 
@@ -1702,8 +1693,8 @@ def _chunk_gated_delta_rule_fwd_stage0_4_one_tile(
     # (a) gather the NB strictly-lower 16x16 diagonal blocks of A
     b_D = tl.zeros([NB, BC, BC], dtype=tl.float32)
     for bi in range(NB):
-        d_blk = extract_slice(b_A, (bi * BC, bi * BC), (BC, BC), (1, 1))
-        b_D = insert_slice(
+        d_blk = tle.dsa.extract_slice(b_A, (bi * BC, bi * BC), (BC, BC), (1, 1))
+        b_D = tle.dsa.insert_slice(
             ful=b_D,
             sub=d_blk[None, :, :],
             offsets=[bi, 0, 0],
@@ -1717,11 +1708,11 @@ def _chunk_gated_delta_rule_fwd_stage0_4_one_tile(
     local_ori = tl.reshape(tl.trans(b_D, (1, 0, 2)), (BC, BC * NB))
     b_D = -b_D * is_lower[None, :, :]
     for i in range(1, BC):
-        row_i = -extract_slice(local_ori, (i, 0), (1, BC * NB), (BC * NB, 1))
+        row_i = -tle.dsa.extract_slice(local_ori, (i, 0), (1, BC * NB), (BC * NB, 1))
         b_a = tl.reshape(row_i, (NB, BC))
         dot_i = tl.sum(tl.trans(b_a[:, :, None] * b_D, (1, 0, 2)), 0)
         b_a = b_a + dot_i
-        b_D = insert_slice(
+        b_D = tle.dsa.insert_slice(
             ful=b_D,
             sub=b_a[:, None, :],
             offsets=[0, i, 0],
@@ -1742,55 +1733,63 @@ def _chunk_gated_delta_rule_fwd_stage0_4_one_tile(
     # which the wrapper asserts.
     #
     # the four 16x16 diagonal-block inverses D_ii = (I + A_ii)^-1
-    D0 = tl.reshape(extract_slice(b_D, (0, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC))
-    D1 = tl.reshape(extract_slice(b_D, (1, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC))
-    D2 = tl.reshape(extract_slice(b_D, (2, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC))
-    D3 = tl.reshape(extract_slice(b_D, (3, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC))
+    D0 = tl.reshape(
+        tle.dsa.extract_slice(b_D, (0, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC)
+    )
+    D1 = tl.reshape(
+        tle.dsa.extract_slice(b_D, (1, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC)
+    )
+    D2 = tl.reshape(
+        tle.dsa.extract_slice(b_D, (2, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC)
+    )
+    D3 = tl.reshape(
+        tle.dsa.extract_slice(b_D, (3, 0, 0), (1, BC, BC), (1, 1, 1)), (BC, BC)
+    )
 
     # --- level 2: two 32x32 inverses. M21 is the strictly-lower off-diagonal
     # block of the original A (still held in b_A here). X21 = -D_hi @ A21 @ D_lo.
-    A_10 = extract_slice(b_A, (16, 0), (BC, BC), (1, 1))  # A[16:32, 0:16]
+    A_10 = tle.dsa.extract_slice(b_A, (16, 0), (BC, BC), (1, 1))  # A[16:32, 0:16]
     Ai_10 = -tl.dot(tl.dot(D1, A_10, allow_tf32=False), D0, allow_tf32=False)
-    A_32 = extract_slice(b_A, (48, 32), (BC, BC), (1, 1))  # A[48:64, 32:48]
+    A_32 = tle.dsa.extract_slice(b_A, (48, 32), (BC, BC), (1, 1))  # A[48:64, 32:48]
     Ai_32 = -tl.dot(tl.dot(D3, A_32, allow_tf32=False), D2, allow_tf32=False)
 
     Ai_11_32 = tl.zeros([32, 32], dtype=tl.float32)
-    Ai_11_32 = insert_slice(
+    Ai_11_32 = tle.dsa.insert_slice(
         ful=Ai_11_32, sub=D0, offsets=[0, 0], sizes=[BC, BC], strides=[1, 1]
     )
-    Ai_11_32 = insert_slice(
+    Ai_11_32 = tle.dsa.insert_slice(
         ful=Ai_11_32, sub=D1, offsets=[16, 16], sizes=[BC, BC], strides=[1, 1]
     )
-    Ai_11_32 = insert_slice(
+    Ai_11_32 = tle.dsa.insert_slice(
         ful=Ai_11_32, sub=Ai_10, offsets=[16, 0], sizes=[BC, BC], strides=[1, 1]
     )
 
     Ai_22_32 = tl.zeros([32, 32], dtype=tl.float32)
-    Ai_22_32 = insert_slice(
+    Ai_22_32 = tle.dsa.insert_slice(
         ful=Ai_22_32, sub=D2, offsets=[0, 0], sizes=[BC, BC], strides=[1, 1]
     )
-    Ai_22_32 = insert_slice(
+    Ai_22_32 = tle.dsa.insert_slice(
         ful=Ai_22_32, sub=D3, offsets=[16, 16], sizes=[BC, BC], strides=[1, 1]
     )
-    Ai_22_32 = insert_slice(
+    Ai_22_32 = tle.dsa.insert_slice(
         ful=Ai_22_32, sub=Ai_32, offsets=[16, 0], sizes=[BC, BC], strides=[1, 1]
     )
 
     # --- level 3: merge the two 32x32 inverses into the full 64x64.
     # X_bl = -Ai_22_32 @ A[32:64, 0:32] @ Ai_11_32
-    A_21_32 = extract_slice(b_A, (32, 0), (32, 32), (1, 1))  # A[32:64, 0:32]
+    A_21_32 = tle.dsa.extract_slice(b_A, (32, 0), (32, 32), (1, 1))  # A[32:64, 0:32]
     Ai_21_32 = -tl.dot(
         tl.dot(Ai_22_32, A_21_32, allow_tf32=False), Ai_11_32, allow_tf32=False
     )
 
     b_Ainv = tl.zeros([BT, BT], dtype=tl.float32)
-    b_Ainv = insert_slice(
+    b_Ainv = tle.dsa.insert_slice(
         ful=b_Ainv, sub=Ai_11_32, offsets=[0, 0], sizes=[32, 32], strides=[1, 1]
     )
-    b_Ainv = insert_slice(
+    b_Ainv = tle.dsa.insert_slice(
         ful=b_Ainv, sub=Ai_22_32, offsets=[32, 32], sizes=[32, 32], strides=[1, 1]
     )
-    b_Ainv = insert_slice(
+    b_Ainv = tle.dsa.insert_slice(
         ful=b_Ainv, sub=Ai_21_32, offsets=[32, 0], sizes=[32, 32], strides=[1, 1]
     )
     b_A = b_Ainv
@@ -1831,14 +1830,14 @@ def _chunk_gated_delta_rule_fwd_stage0_4_one_tile(
         b_kb = b_k * (b_beta * b_eg)[:, None]
 
         b_rhs = tl.zeros([BT, 256], dtype=v.dtype.element_ty)
-        b_rhs = insert_slice(
+        b_rhs = tle.dsa.insert_slice(
             ful=b_rhs,
             sub=b_vb.to(v.dtype.element_ty),
             offsets=[0, 0],
             sizes=[BT, BV],
             strides=[1, 1],
         )
-        b_rhs = insert_slice(
+        b_rhs = tle.dsa.insert_slice(
             ful=b_rhs,
             sub=b_kb.to(k.dtype.element_ty),
             offsets=[0, 128],
@@ -1850,8 +1849,8 @@ def _chunk_gated_delta_rule_fwd_stage0_4_one_tile(
             b_rhs,
             allow_tf32=False,
         )
-        b_u = extract_slice(b_uw, (0, 0), (BT, BV), (1, 1))
-        b_w = extract_slice(b_uw, (0, 128), (BT, BK), (1, 1))
+        b_u = tle.dsa.extract_slice(b_uw, (0, 0), (BT, BV), (1, 1))
+        b_w = tle.dsa.extract_slice(b_uw, (0, 128), (BT, BK), (1, 1))
 
         p_u = tl.make_block_ptr(
             u + (bos * H + i_h) * V,
